@@ -94,7 +94,11 @@ const STEPS = [
   { id: 'review', label: 'Review' },
 ];
 
-/* ---------------- Storage (local-first) ---------------- */
+/* ---------------- Storage (local-first) ----------------
+   Photo image data lives in IndexedDB (see photoDB below), NOT localStorage:
+   iOS Safari caps localStorage around ~5MB, and a few phone photos blow past
+   it ("browser storage is full"). localStorage keeps tiny metadata only. */
+let idbOk = false;
 const store = {
   get(k, fb) {
     try {
@@ -104,7 +108,7 @@ const store = {
   },
   set(k, v) {
     try {
-      localStorage.setItem(k, JSON.stringify(v));
+      localStorage.setItem(k, JSON.stringify(idbOk ? withoutPhotoBlobs(v) : v));
       return true;
     } catch (e) {
       toast('Could not save — browser storage is full. Try removing a photo.', 'err');
@@ -113,6 +117,77 @@ const store = {
   },
   del(k) { try { localStorage.removeItem(k); } catch (e) {} },
 };
+
+/* ---------------- Photo blob store (IndexedDB) ---------------- */
+const photoDB = {
+  _db: null,
+  open() {
+    return new Promise((resolve) => {
+      if (!('indexedDB' in window)) return resolve(false);
+      let req;
+      try { req = indexedDB.open('wsep-photos', 1); }
+      catch (e) { return resolve(false); }
+      req.onupgradeneeded = () => { req.result.createObjectStore('photos', { keyPath: 'id' }); };
+      req.onsuccess = () => { photoDB._db = req.result; resolve(true); };
+      req.onerror = () => resolve(false);
+      req.onblocked = () => resolve(false);
+    });
+  },
+  _tx(mode, fn) {
+    return new Promise((resolve, reject) => {
+      try {
+        const tx = photoDB._db.transaction('photos', mode);
+        const req = fn(tx.objectStore('photos'));
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error || new Error('idb'));
+      } catch (e) { reject(e); }
+    });
+  },
+  put(id, dataUrl) { return photoDB._tx('readwrite', (st) => st.put({ id: id, dataUrl: dataUrl })); },
+  get(id) {
+    return photoDB._tx('readonly', (st) => st.get(id))
+      .then((r) => (r && r.dataUrl) || null)
+      .catch(() => null);
+  },
+  del(id) { return photoDB._tx('readwrite', (st) => st.delete(id)).catch(() => null); },
+};
+
+/* Deep-clone `v`, dropping dataUrl from every object inside a `photos`
+   array. In-memory photo objects keep their dataUrl for rendering and PDF
+   export; localStorage never sees the blobs once IndexedDB is available. */
+function withoutPhotoBlobs(v) {
+  if (Array.isArray(v)) return v.map(withoutPhotoBlobs);
+  if (v && typeof v === 'object') {
+    const out = {};
+    for (const k of Object.keys(v)) {
+      if (k === 'photos' && Array.isArray(v[k])) {
+        out[k] = v[k].map((p) => {
+          if (p && typeof p === 'object') {
+            const c = withoutPhotoBlobs(p);
+            delete c.dataUrl;
+            return c;
+          }
+          return p;
+        });
+      } else {
+        out[k] = withoutPhotoBlobs(v[k]);
+      }
+    }
+    return out;
+  }
+  return v;
+}
+
+function eachPhoto(obj, fn) {
+  if (!obj || typeof obj !== 'object') return;
+  if (Array.isArray(obj.photos)) obj.photos.forEach(fn);
+}
+function eachEstimatePhoto(fn) {
+  estimates.forEach((e) => { if (e && e.data) eachPhoto(e.data, fn); });
+}
+function dropPhotoBlobs(list) {
+  (list || []).forEach((p) => { if (idbOk && p && p.id) photoDB.del(p.id); });
+}
 
 /* ---------------- State ---------------- */
 let shop = Object.assign({
@@ -219,7 +294,7 @@ function showLightbox(photo) {
   root.innerHTML =
     '<div class="lightbox-backdrop" role="dialog" aria-modal="true" aria-label="Photo preview">' +
     '<button type="button" class="lightbox-close" aria-label="Close photo preview">&times;</button>' +
-    '<img src="' + photo.dataUrl + '" alt="' + esc(photo.label || 'Wheel photo') + '">' +
+    '<img src="' + (photo.dataUrl || '') + '" alt="' + esc(photo.label || 'Wheel photo') + '">' +
     (photo.label ? '<div class="lightbox-cap">' + esc(photo.label) + '</div>' : '') +
     '</div>';
   const close = () => {
@@ -764,12 +839,8 @@ function buildVinOcrWorker() {
     setTessStatus('Starting scanner…');
     const worker = await T.createWorker('eng', T.OEM.LSTM_ONLY, {
       workerPath: base + 'tesseract-worker.min.js',
-      /* Engine core + language data load from pinned CDNs (this phone copy
-         is deployed through a text-only channel, so the ~18 MB of binaries
-         live here instead of in the repo). Versions are pinned to match the
-         tested v2.3 build: tesseract.js-core 5.1.1, tessdata_fast eng. */
-      corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.1/',
-      langPath: 'https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/',
+      corePath: base,
+      langPath: base,
       /* The bundled language file is eng.traineddata (not .gz). Tesseract's
          gzip option defaults to true, which makes it request
          eng.traineddata.gz -> 404 -> the createWorker promise never settles.
@@ -990,7 +1061,7 @@ function stepPhotos() {
   const cards = draft.photos.map((p) =>
     '<div class="photo-card">' +
     '<button type="button" data-action="photo-view" data-id="' + p.id + '" aria-label="View photo ' + esc(p.label || 'untitled') + '" style="border:0;padding:0;background:none;cursor:pointer;display:block;width:100%">' +
-    '<img src="' + p.dataUrl + '" alt="' + esc(p.label || 'Wheel photo') + '" loading="lazy"></button>' +
+    '<img src="' + (p.dataUrl || '') + '" alt="' + esc(p.label || 'Wheel photo') + '" loading="lazy"></button>' +
     '<input type="text" class="photo-label-input" data-photo-label="' + p.id + '" value="' + esc(p.label) + '" placeholder="Label (e.g. Front left — before)" aria-label="Photo label" maxlength="60">' +
     '<div class="photo-card-footer">' +
     '<button type="button" class="btn btn-secondary" data-action="photo-view" data-id="' + p.id + '">View</button>' +
@@ -1050,7 +1121,9 @@ async function handlePhotoFiles(fileList) {
   for (const f of batch) {
     try {
       const dataUrl = await processImageFile(f, 1400, 0.82);
-      draft.photos.push({ id: uid(), dataUrl, label: '', ts: Date.now() });
+      const pid = uid();
+      if (idbOk) { try { await photoDB.put(pid, dataUrl); } catch (e) { /* blob stays memory-only */ } }
+      draft.photos.push({ id: pid, dataUrl: dataUrl, label: '', ts: Date.now() });
       added++;
     } catch (e) { /* skip bad file */ }
   }
@@ -1160,7 +1233,7 @@ function reportHTML(d, forShare) {
   const photos = d.photos.length
     ? '<div class="report-sec"><h3>Photos (' + d.photos.length + ')</h3><div class="report-photos">' +
       d.photos.map((p) =>
-        '<figure><img src="' + p.dataUrl + '" alt="' + esc(p.label || 'Wheel photo') + '" loading="lazy">' +
+        '<figure><img src="' + (p.dataUrl || '') + '" alt="' + esc(p.label || 'Wheel photo') + '" loading="lazy">' +
         (p.label ? '<figcaption>' + esc(p.label) + '</figcaption>' : '') + '</figure>'
       ).join('') + '</div></div>'
     : '';
@@ -1689,6 +1762,7 @@ function restoreBackupFile(file) {
     });
     if (!ok) return;
     const r = mergeBackupData(obj.data);
+    if (idbOk) { await migratePhotoBlobs(); await hydratePhotos(); }
     render();
     toast('Restore complete: ' + r.added + ' added' + (r.skipped ? ', ' + r.skipped + ' already here skipped' : '') + '.');
   };
@@ -1745,7 +1819,7 @@ document.addEventListener('click', async (e) => {
   else if (a === 'photo-choose') $('#photoLibraryInput').click();
   else if (a === 'photo-remove') {
     const ok = await confirmDialog({ title: 'Remove this photo?', body: 'The photo will be removed from this estimate.', confirmText: 'Remove photo', danger: true });
-    if (ok) { draft.photos = draft.photos.filter((p) => p.id !== btn.dataset.id); markDirty(); render(); toast('Photo removed.'); }
+    if (ok) { const goneId = btn.dataset.id; dropPhotoBlobs(draft.photos.filter((p) => p.id === goneId)); draft.photos = draft.photos.filter((p) => p.id !== goneId); markDirty(); render(); toast('Photo removed.'); }
   }
   else if (a === 'photo-view') {
     const p = draft.photos.find((x) => x.id === btn.dataset.id);
@@ -1816,6 +1890,8 @@ document.addEventListener('click', async (e) => {
       confirmText: 'Delete', danger: true,
     });
     if (ok) {
+      const gone = estimates.find((x) => x.id === btn.dataset.id);
+      if (gone && gone.data) dropPhotoBlobs(gone.data.photos);
       estimates = estimates.filter((x) => x.id !== btn.dataset.id);
       store.set(LS_ESTIMATES, estimates);
       render(); toast('Estimate deleted.');
@@ -1832,6 +1908,7 @@ async function startWizard(fromTab) {
       confirmText: 'Discard & start new', cancelText: 'Keep editing', danger: true,
     });
     if (!ok) return;
+    dropPhotoBlobs(draft.photos);
     draft = newEstimate();
     store.set(LS_DRAFT, draft);
   } else if (!has) {
@@ -1993,11 +2070,52 @@ function initTheme() {
   });
 }
 
+/* One-time migration: photos saved before v2.3 kept their dataUrl inside
+   localStorage. Move each blob to IndexedDB; the next store.set() strips it.
+   Idempotent — only photos that still carry an embedded dataUrl are moved. */
+async function migratePhotoBlobs() {
+  if (!idbOk) return;
+  const jobs = [];
+  const migrateOne = (p) => {
+    if (p && p.id && typeof p.dataUrl === 'string' && p.dataUrl) {
+      jobs.push(photoDB.put(p.id, p.dataUrl).catch(() => null));
+    }
+  };
+  if (draft) (draft.photos || []).forEach(migrateOne);
+  eachEstimatePhoto(migrateOne);
+  await Promise.all(jobs);
+  if (jobs.length) {
+    if (draft) store.set(LS_DRAFT, draft);
+    store.set(LS_ESTIMATES, estimates);
+  }
+}
+
+/* Re-attach photo blobs to the in-memory draft/estimates after boot (or
+   after a backup restore). Rendering and PDF export read p.dataUrl from
+   memory; localStorage only ever holds {id,label,ts}. */
+async function hydratePhotos() {
+  if (!idbOk) return;
+  const jobs = [];
+  const hydrateOne = (p) => {
+    if (p && p.id && !p.dataUrl) {
+      jobs.push(photoDB.get(p.id).then((d) => { if (d) p.dataUrl = d; }));
+    }
+  };
+  if (draft) (draft.photos || []).forEach(hydrateOne);
+  eachEstimatePhoto(hydrateOne);
+  await Promise.all(jobs);
+}
+
 /* ---------------- Init ---------------- */
-function init() {
+async function init() {
   ensureFileInputs();
   initTheme();
   initPWA();
+  try { idbOk = await photoDB.open(); } catch (e) { idbOk = false; }
+  if (idbOk) {
+    await migratePhotoBlobs();
+    await hydratePhotos();
+  }
   if (!draft) draft = null;
   render();
 }

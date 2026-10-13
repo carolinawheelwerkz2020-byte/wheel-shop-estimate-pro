@@ -1,5 +1,5 @@
 /* Wheel Shop Estimate Pro — offline service worker (phone copy) */
-const CACHE = 'wsep-v3';
+const CACHE = 'wsep-v4';
 /* Core app: installed atomically. The OCR engine (~18 MB) and PDF library
    load on demand from pinned CDNs (see app.js / index.html) and are cached
    by the fetch handler below, so a slow first download can never break the
