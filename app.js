@@ -57,8 +57,12 @@ const LS_SHOP = 'wsep.v1.shop';
 const LS_ESTIMATES = 'wsep.v1.estimates';
 const LS_DRAFT = 'wsep.v1.draft';
 const LS_COUNTER = 'wsep.v1.counter';
+const LS_WORKORDERS = 'wsep.v1.workorders';
+const LS_INVOICES = 'wsep.v1.invoices';
+const LS_WO_COUNTER = 'wsep.v1.wo_counter';
+const LS_INV_COUNTER = 'wsep.v1.inv_counter';
 const MAX_PHOTOS = 6;
-const APP_VERSION = '2.3';
+const APP_VERSION = '2.4';
 
 const DAMAGE_CATS = [
   { id: 'curbRash', label: 'Curb rash' },
@@ -194,8 +198,11 @@ let shop = Object.assign({
   name: '', phone: '', website: '', address: '', taxRate: '', logo: ''
 }, store.get(LS_SHOP, {}));
 let estimates = store.get(LS_ESTIMATES, []);
+let workorders = store.get(LS_WORKORDERS, []);
+let invoices = store.get(LS_INVOICES, []);
 let draft = store.get(LS_DRAFT, null);
 let route = 'home';
+let routeParam = null; /* id of the work order / invoice being viewed */
 let step = 0;
 let lastFocus = null;
 
@@ -203,6 +210,60 @@ function nextEstimateNumber() {
   const n = (store.get(LS_COUNTER, 0) || 0) + 1;
   store.set(LS_COUNTER, n);
   return 'EST-' + new Date().getFullYear() + '-' + String(n).padStart(4, '0');
+}
+
+function nextWorkOrderNumber() {
+  const n = (store.get(LS_WO_COUNTER, 0) || 0) + 1;
+  store.set(LS_WO_COUNTER, n);
+  return 'WO-' + new Date().getFullYear() + '-' + String(n).padStart(4, '0');
+}
+
+function nextInvoiceNumber() {
+  const n = (store.get(LS_INV_COUNTER, 0) || 0) + 1;
+  store.set(LS_INV_COUNTER, n);
+  return 'INV-' + new Date().getFullYear() + '-' + String(n).padStart(4, '0');
+}
+
+const WO_STATUSES = ['open', 'in_progress', 'completed'];
+const WO_STATUS_LABEL = { open: 'Open', in_progress: 'In Progress', completed: 'Completed' };
+const INV_STATUSES = ['unpaid', 'paid'];
+const INV_STATUS_LABEL = { unpaid: 'Unpaid', paid: 'Paid' };
+
+function newWorkOrderFromEstimate(estData) {
+  return {
+    id: uid(),
+    number: nextWorkOrderNumber(),
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    status: 'open',
+    sourceEstimateId: estData.id,
+    sourceEstimateNumber: estData.number,
+    customer: JSON.parse(JSON.stringify(estData.customer || {})),
+    vehicle: JSON.parse(JSON.stringify(estData.vehicle || {})),
+    wheels: JSON.parse(JSON.stringify(estData.wheels || [])),
+    items: JSON.parse(JSON.stringify(estData.items || [])),
+    taxRate: estData.taxRate,
+    techNotes: '',
+    shopSnapshot: Object.assign({}, shop),
+  };
+}
+
+function newInvoiceFromWorkOrder(woData) {
+  return {
+    id: uid(),
+    number: nextInvoiceNumber(),
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    status: 'unpaid',
+    sourceWorkOrderId: woData.id,
+    sourceWorkOrderNumber: woData.number,
+    customer: JSON.parse(JSON.stringify(woData.customer || {})),
+    vehicle: JSON.parse(JSON.stringify(woData.vehicle || {})),
+    items: JSON.parse(JSON.stringify(woData.items || [])),
+    taxRate: woData.taxRate,
+    amountPaidCents: 0,
+    shopSnapshot: Object.assign({}, shop),
+  };
 }
 
 function newWheel() {
@@ -339,6 +400,7 @@ function fieldHTML({ id, label, path, type = 'text', required = false, placehold
 function navigate(r, opts) {
   opts = opts || {};
   route = r;
+  routeParam = opts.id || null;
   if (r === 'wizard' && typeof opts.step === 'number') step = opts.step;
   render();
   const main = $('#main');
@@ -357,6 +419,10 @@ function render() {
   else if (route === 'saved') screen.innerHTML = viewSaved();
   else if (route === 'shop') screen.innerHTML = viewShop();
   else if (route === 'wizard') screen.innerHTML = viewWizard();
+  else if (route === 'workorders') screen.innerHTML = viewWorkOrders();
+  else if (route === 'workorder') screen.innerHTML = viewWorkOrderDetail(routeParam);
+  else if (route === 'invoices') screen.innerHTML = viewInvoices();
+  else if (route === 'invoice') screen.innerHTML = viewInvoiceDetail(routeParam);
 
   updateBrandHeader();
 }
@@ -425,6 +491,7 @@ function viewSaved() {
         '<span>' + d.photos.length + ' photo' + (d.photos.length === 1 ? '' : 's') + '</span></div>' +
         '<div class="saved-actions">' +
         '<button type="button" class="btn btn-navy btn-sm" data-action="saved-open" data-id="' + esc(e.id) + '">Open</button>' +
+        '<button type="button" class="btn btn-primary btn-sm" data-action="est-to-wo" data-id="' + esc(e.id) + '">→ Work order</button>' +
         '<button type="button" class="btn btn-secondary btn-sm" data-action="saved-dup" data-id="' + esc(e.id) + '">Duplicate</button>' +
         '<button type="button" class="btn btn-danger btn-sm" data-action="saved-del" data-id="' + esc(e.id) + '">Delete</button>' +
         '</div></div>';
@@ -432,6 +499,163 @@ function viewSaved() {
   }
   return '<div class="step-head"><h1>Saved estimates</h1>' +
     '<p class="page-sub">Everything is stored on this device — no account needed.</p></div>' + body;
+}
+
+/* ---------------- Work orders ---------------- */
+function woStatusBadge(st) {
+  const cls = st === 'completed' ? 'badge-final' : (st === 'in_progress' ? 'badge-progress' : 'badge-open');
+  return '<span class="badge ' + cls + '">' + esc(WO_STATUS_LABEL[st] || st) + '</span>';
+}
+
+function viewWorkOrders() {
+  let body = '';
+  if (!workorders.length) {
+    body = '<div class="card"><div class="empty-state">' +
+      '<div class="big" aria-hidden="true">🔧</div>' +
+      '<h2>No work orders yet</h2>' +
+      '<p>Turn a saved estimate into a work order to track the job through your shop.</p>' +
+      '<button type="button" class="btn btn-primary" data-action="go" data-route="saved">Go to estimates</button>' +
+      '</div></div>';
+  } else {
+    body = workorders.map((w) => {
+      const t = totalsFor(w);
+      const veh = [w.vehicle.year, w.vehicle.make, w.vehicle.model].filter(Boolean).join(' ');
+      return '<div class="card saved-card">' +
+        '<div class="saved-top"><div><div class="saved-num">' + esc(w.number) + '</div>' +
+        '<div class="saved-date">' + esc(fmtDate(w.createdAt)) + '</div></div>' +
+        woStatusBadge(w.status) + '</div>' +
+        '<div class="saved-cust">' + esc(w.customer.name || '—') + '</div>' +
+        '<div class="saved-veh">' + esc(veh || 'No vehicle entered') + '</div>' +
+        '<div class="saved-meta"><span class="saved-total">' + fmtMoney(t.total) + '</span>' +
+        '<span>' + w.items.length + ' item' + (w.items.length === 1 ? '' : 's') + '</span>' +
+        (w.sourceEstimateNumber ? '<span>from ' + esc(w.sourceEstimateNumber) + '</span>' : '') + '</div>' +
+        '<div class="saved-actions">' +
+        '<button type="button" class="btn btn-navy btn-sm" data-action="wo-open" data-id="' + esc(w.id) + '">Open</button>' +
+        '<button type="button" class="btn btn-danger btn-sm" data-action="wo-del" data-id="' + esc(w.id) + '">Delete</button>' +
+        '</div></div>';
+    }).join('');
+  }
+  return '<div class="step-head"><h1>Work orders</h1>' +
+    '<p class="page-sub">Jobs moving through your shop.</p></div>' + body;
+}
+
+function viewWorkOrderDetail(id) {
+  const w = workorders.find((x) => x.id === id);
+  if (!w) return '<div class="card"><p>Work order not found.</p><button type="button" class="btn btn-secondary" data-action="go" data-route="workorders">Back</button></div>';
+  const t = totalsFor(w);
+  const veh = [w.vehicle.year, w.vehicle.make, w.vehicle.model].filter(Boolean).join(' ');
+  const statusBtns = WO_STATUSES.map((s) =>
+    '<button type="button" class="btn btn-sm ' + (w.status === s ? 'btn-navy' : 'btn-secondary') + '" data-action="wo-status" data-id="' + esc(w.id) + '" data-status="' + s + '">' + esc(WO_STATUS_LABEL[s]) + '</button>'
+  ).join('');
+  const itemsHtml = w.items.length
+    ? w.items.map((it) => {
+        const r = parseMoneyToCents(it.priceStr);
+        const cents = r.ok ? r.cents : (it.priceCents || 0);
+        return '<div class="line-item"><span>' + esc(it.desc || '—') + '</span><b>' + fmtMoney(cents) + '</b></div>';
+      }).join('')
+    : '<p class="hint">No line items.</p>';
+  return '' +
+    '<div class="step-head"><button type="button" class="btn btn-ghost btn-sm" data-action="go" data-route="workorders">← Work orders</button>' +
+    '<h1>' + esc(w.number) + '</h1>' +
+    '<p class="page-sub">' + esc(fmtDate(w.createdAt)) + (w.sourceEstimateNumber ? ' · from ' + esc(w.sourceEstimateNumber) : '') + '</p></div>' +
+    '<div class="card"><h2>Status</h2><div class="btn-row">' + statusBtns + '</div></div>' +
+    '<div class="card"><h2>Customer</h2>' +
+    '<p><b>' + esc(w.customer.name || '—') + '</b><br>' + esc(w.customer.phone || '') + (w.customer.email ? '<br>' + esc(w.customer.email) : '') + '</p>' +
+    '<h2>Vehicle</h2><p>' + esc(veh || '—') + (w.vehicle.vin ? '<br>VIN: ' + esc(w.vehicle.vin) : '') + '</p></div>' +
+    '<div class="card"><h2>Work to perform</h2>' + itemsHtml +
+    '<div class="totals-mini"><span>Estimated total</span><b>' + fmtMoney(t.total) + '</b></div></div>' +
+    '<div class="card"><h2>Technician notes</h2>' +
+    '<textarea id="woNotes" class="input" rows="3" placeholder="Notes for the tech…">' + esc(w.techNotes || '') + '</textarea>' +
+    '<div class="btn-row mt"><button type="button" class="btn btn-secondary btn-sm" data-action="wo-save-notes" data-id="' + esc(w.id) + '">Save notes</button></div></div>' +
+    '<div class="card"><h2>Document</h2><div class="action-grid">' +
+    '<button type="button" class="btn btn-primary" data-action="wo-to-invoice" data-id="' + esc(w.id) + '">🧾 Create invoice</button>' +
+    '<button type="button" class="btn btn-secondary" data-action="wo-share" data-id="' + esc(w.id) + '">📤 Share PDF</button>' +
+    '<button type="button" class="btn btn-secondary" data-action="wo-download" data-id="' + esc(w.id) + '">⬇ Download PDF</button>' +
+    '<button type="button" class="btn btn-secondary" data-action="wo-print" data-id="' + esc(w.id) + '">🖨 Print / PDF</button>' +
+    '</div></div>';
+}
+
+/* ---------------- Invoices ---------------- */
+function invStatusBadge(st) {
+  const cls = st === 'paid' ? 'badge-final' : 'badge-open';
+  return '<span class="badge ' + cls + '">' + esc(INV_STATUS_LABEL[st] || st) + '</span>';
+}
+
+function invBalance(inv) {
+  const t = totalsFor(inv);
+  const paid = inv.amountPaidCents || 0;
+  return { total: t.total, paid: paid, due: Math.max(0, t.total - paid) };
+}
+
+function viewInvoices() {
+  let body = '';
+  if (!invoices.length) {
+    body = '<div class="card"><div class="empty-state">' +
+      '<div class="big" aria-hidden="true">🧾</div>' +
+      '<h2>No invoices yet</h2>' +
+      '<p>Create an invoice from a work order when the job is done.</p>' +
+      '<button type="button" class="btn btn-primary" data-action="go" data-route="workorders">Go to work orders</button>' +
+      '</div></div>';
+  } else {
+    const totalDue = invoices.reduce((s, iv) => s + invBalance(iv.data || iv).due, 0);
+    body = '<div class="home-stats"><div class="stat"><b>' + fmtMoney(totalDue) + '</b><span>Total outstanding</span></div></div>';
+    body += invoices.map((iv) => {
+      const b = invBalance(iv);
+      const veh = [iv.vehicle.year, iv.vehicle.make, iv.vehicle.model].filter(Boolean).join(' ');
+      return '<div class="card saved-card">' +
+        '<div class="saved-top"><div><div class="saved-num">' + esc(iv.number) + '</div>' +
+        '<div class="saved-date">' + esc(fmtDate(iv.createdAt)) + '</div></div>' +
+        invStatusBadge(iv.status) + '</div>' +
+        '<div class="saved-cust">' + esc(iv.customer.name || '—') + '</div>' +
+        '<div class="saved-veh">' + esc(veh || 'No vehicle entered') + '</div>' +
+        '<div class="saved-meta"><span class="saved-total">' + fmtMoney(b.due) + ' due</span>' +
+        '<span>' + fmtMoney(b.total) + ' total</span>' +
+        (iv.sourceWorkOrderNumber ? '<span>from ' + esc(iv.sourceWorkOrderNumber) + '</span>' : '') + '</div>' +
+        '<div class="saved-actions">' +
+        '<button type="button" class="btn btn-navy btn-sm" data-action="inv-open" data-id="' + esc(iv.id) + '">Open</button>' +
+        '<button type="button" class="btn btn-danger btn-sm" data-action="inv-del" data-id="' + esc(iv.id) + '">Delete</button>' +
+        '</div></div>';
+    }).join('');
+  }
+  return '<div class="step-head"><h1>Invoices</h1>' +
+    '<p class="page-sub">Billing and payment tracking.</p></div>' + body;
+}
+
+function viewInvoiceDetail(id) {
+  const iv = invoices.find((x) => x.id === id);
+  if (!iv) return '<div class="card"><p>Invoice not found.</p><button type="button" class="btn btn-secondary" data-action="go" data-route="invoices">Back</button></div>';
+  const b = invBalance(iv);
+  const veh = [iv.vehicle.year, iv.vehicle.make, iv.vehicle.model].filter(Boolean).join(' ');
+  const itemsHtml = iv.items.length
+    ? iv.items.map((it) => {
+        const r = parseMoneyToCents(it.priceStr);
+        const cents = r.ok ? r.cents : (it.priceCents || 0);
+        return '<div class="line-item"><span>' + esc(it.desc || '—') + '</span><b>' + fmtMoney(cents) + '</b></div>';
+      }).join('')
+    : '<p class="hint">No line items.</p>';
+  return '' +
+    '<div class="step-head"><button type="button" class="btn btn-ghost btn-sm" data-action="go" data-route="invoices">← Invoices</button>' +
+    '<h1>' + esc(iv.number) + '</h1>' +
+    '<p class="page-sub">' + esc(fmtDate(iv.createdAt)) + (iv.sourceWorkOrderNumber ? ' · from ' + esc(iv.sourceWorkOrderNumber) : '') + '</p></div>' +
+    '<div class="card"><h2>Payment</h2>' +
+    '<div class="totals-mini"><span>Total</span><b>' + fmtMoney(b.total) + '</b></div>' +
+    '<div class="totals-mini"><span>Paid</span><b>' + fmtMoney(b.paid) + '</b></div>' +
+    '<div class="totals-mini due"><span>Balance due</span><b>' + fmtMoney(b.due) + '</b></div>' +
+    '<div class="btn-row mt">' +
+    (iv.status !== 'paid' ? '<button type="button" class="btn btn-navy btn-sm" data-action="inv-mark-paid" data-id="' + esc(iv.id) + '">Mark paid in full</button>' : '') +
+    '</div>' +
+    '<div class="field-row mt"><label>Record payment<input id="invPayAmt" class="input" inputmode="decimal" placeholder="0.00"></label>' +
+    '<button type="button" class="btn btn-secondary btn-sm" data-action="inv-record-pay" data-id="' + esc(iv.id) + '">Add</button></div>' +
+    '<div class="mt">' + invStatusBadge(iv.status) + '</div></div>' +
+    '<div class="card"><h2>Customer</h2>' +
+    '<p><b>' + esc(iv.customer.name || '—') + '</b><br>' + esc(iv.customer.phone || '') + (iv.customer.email ? '<br>' + esc(iv.customer.email) : '') + '</p>' +
+    '<h2>Vehicle</h2><p>' + esc(veh || '—') + (iv.vehicle.vin ? '<br>VIN: ' + esc(iv.vehicle.vin) : '') + '</p></div>' +
+    '<div class="card"><h2>Services</h2>' + itemsHtml + '</div>' +
+    '<div class="card"><h2>Document</h2><div class="action-grid">' +
+    '<button type="button" class="btn btn-secondary" data-action="inv-share" data-id="' + esc(iv.id) + '">📤 Share PDF</button>' +
+    '<button type="button" class="btn btn-secondary" data-action="inv-download" data-id="' + esc(iv.id) + '">⬇ Download PDF</button>' +
+    '<button type="button" class="btn btn-secondary" data-action="inv-print" data-id="' + esc(iv.id) + '">🖨 Print / PDF</button>' +
+    '</div></div>';
 }
 
 /* ---------------- Shop setup ---------------- */
@@ -839,8 +1063,8 @@ function buildVinOcrWorker() {
     setTessStatus('Starting scanner…');
     const worker = await T.createWorker('eng', T.OEM.LSTM_ONLY, {
       workerPath: base + 'tesseract-worker.min.js',
-      corePath: base,
-      langPath: base,
+      corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.1/',
+      langPath: 'https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/',
       /* The bundled language file is eng.traineddata (not .gz). Tesseract's
          gzip option defaults to true, which makes it request
          eng.traineddata.gz -> 404 -> the createWorker promise never settles.
@@ -1342,7 +1566,8 @@ function isIOS() {
   return navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1;
 }
 
-function buildPdf(d) {
+function buildPdf(d, kind) {
+  kind = kind || 'estimate';
   const NS = window.jspdf || {};
   if (!NS.jsPDF) throw new Error('PDF engine not loaded');
   const doc = new NS.jsPDF({ unit: 'pt', format: 'letter' });
@@ -1352,6 +1577,8 @@ function buildPdf(d) {
   const t = totalsFor(d);
   const veh = [d.vehicle.year, d.vehicle.make, d.vehicle.model].filter(Boolean).join(' ');
   const validThrough = fmtDate(d.createdAt + 30 * 24 * 3600 * 1000);
+  const docTitle = str(s.name) || 'Wheel Repair Estimate';
+  const docType = kind === 'workorder' ? 'WORK ORDER' : (kind === 'invoice' ? 'INVOICE' : null);
   const str = (v) => String(v == null ? '' : v);
   let y = 60;
 
@@ -1389,7 +1616,11 @@ function buildPdf(d) {
     } catch (e) { /* logo must never break the report */ }
   }
   doc.setFont('helvetica', 'bold'); doc.setFontSize(20); doc.setTextColor.apply(doc, NAVY);
-  doc.text(str(s.name) || 'Wheel Repair Estimate', M, y); y += 20;
+  doc.text(docTitle, M, y); y += 20;
+  if (docType) {
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(13); doc.setTextColor.apply(doc, NAVY);
+    doc.text(docType, M, y); y += 18;
+  }
   doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.setTextColor.apply(doc, GRAY);
   const contact = [s.phone, s.website].filter(Boolean).join('  ·  ');
   if (contact) { doc.text(contact, M, y); y += 14; }
@@ -1398,7 +1629,10 @@ function buildPdf(d) {
 
   /* Meta */
   ensure(36);
-  const meta = [['Estimate', d.number], ['Date', fmtDate(d.createdAt)], ['Valid through', validThrough]];
+  let meta;
+  if (kind === 'workorder') meta = [['Work Order', d.number], ['Date', fmtDate(d.createdAt)], ['Status', WO_STATUS_LABEL[d.status] || d.status]];
+  else if (kind === 'invoice') meta = [['Invoice', d.number], ['Date', fmtDate(d.createdAt)], ['Status', INV_STATUS_LABEL[d.status] || d.status]];
+  else meta = [['Estimate', d.number], ['Date', fmtDate(d.createdAt)], ['Valid through', validThrough]];
   const colW = CW / 3;
   meta.forEach((pair, i) => {
     const x = M + i * colW;
@@ -1460,7 +1694,7 @@ function buildPdf(d) {
   }
 
   /* Services */
-  secTitle('Recommended work');
+  secTitle(kind === 'workorder' ? 'Work to perform' : (kind === 'invoice' ? 'Services' : 'Recommended work'));
   ensure(24);
   doc.setFont('helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor.apply(doc, GRAY);
   doc.text('Service', M, y);
@@ -1493,7 +1727,21 @@ function buildPdf(d) {
   y += 4;
   totRow('Subtotal', t.subtotal);
   totRow('Tax (' + t.rate + '%)', t.tax);
-  totRow('Estimated total', t.total, true, 14);
+  if (kind === 'invoice') {
+    const paid = d.amountPaidCents || 0;
+    totRow('Total', t.total, true, 14);
+    totRow('Amount paid', paid);
+    totRow('Balance due', Math.max(0, t.total - paid), true, 14);
+  } else {
+    totRow('Estimated total', t.total, true, 14);
+  }
+
+  /* Work order tech notes */
+  if (kind === 'workorder' && d.techNotes) {
+    y += 4;
+    secTitle('Technician notes');
+    para(d.techNotes);
+  }
 
   /* Terms */
   y += 4;
@@ -1514,17 +1762,18 @@ function buildPdf(d) {
 
   /* Footers */
   const pages = doc.getNumberOfPages();
+  const footLabel = kind === 'workorder' ? 'Work Order' : (kind === 'invoice' ? 'Invoice' : 'Estimate');
   for (let i = 1; i <= pages; i++) {
     doc.setPage(i);
     doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor.apply(doc, GRAY);
     doc.text('Thank you for trusting ' + (str(s.name) || 'our shop') + ' with your wheels.', M, PH - 34);
-    doc.text('Estimate ' + str(d.number) + '  ·  Page ' + i + ' of ' + pages, PW - M, PH - 34, { align: 'right' });
+    doc.text(footLabel + ' ' + str(d.number) + '  ·  Page ' + i + ' of ' + pages, PW - M, PH - 34, { align: 'right' });
   }
   return doc.output('blob');
 }
 
-function pdfFileFor(d) {
-  return new File([buildPdf(d)], d.number + '.pdf', { type: 'application/pdf' });
+function pdfFileFor(d, kind) {
+  return new File([buildPdf(d, kind)], d.number + '.pdf', { type: 'application/pdf' });
 }
 
 /* Share the real PDF through the native share sheet (iPhone's reliable path),
@@ -1585,6 +1834,39 @@ function downloadPdfReport() {
   catch (e) { toast('Could not build the PDF.', 'err'); return; }
   if (downloadBlob(file, file.name)) toast('PDF downloaded.');
   else toast('Download failed — your browser blocked it.', 'err');
+}
+
+/* ---------------- Work order / invoice PDFs ---------------- */
+function docPdfShare(docData, kind, label) {
+  let file;
+  try { file = pdfFileFor(docData, kind); }
+  catch (e) { toast('Could not build the PDF.', 'err'); return; }
+  if (navigator.canShare) {
+    try {
+      if (navigator.canShare({ files: [file] })) {
+        navigator.share({ title: label + ' ' + docData.number, files: [file] })
+          .then(() => toast('Shared.'))
+          .catch((e) => { if (!(e && e.name === 'AbortError')) toast('Share failed.', 'err'); });
+        return;
+      }
+    } catch (e) { /* fall through to download */ }
+  }
+  if (downloadBlob(file, file.name)) toast('PDF downloaded.');
+  else toast('Could not share or download the PDF.', 'err');
+}
+
+function docPdfDownload(docData, kind) {
+  let file;
+  try { file = pdfFileFor(docData, kind); }
+  catch (e) { toast('Could not build the PDF.', 'err'); return; }
+  if (downloadBlob(file, file.name)) toast('PDF downloaded.');
+  else toast('Download failed — your browser blocked it.', 'err');
+}
+
+function docPdfPrint(docData, kind, label) {
+  /* Same iOS rule as estimates: share sheet carries Print on iPhones. */
+  if (isIOS()) { docPdfShare(docData, kind, label); return; }
+  window.print();
 }
 
 async function saveEstimate() {
@@ -1895,6 +2177,120 @@ document.addEventListener('click', async (e) => {
       estimates = estimates.filter((x) => x.id !== btn.dataset.id);
       store.set(LS_ESTIMATES, estimates);
       render(); toast('Estimate deleted.');
+    }
+  }
+  /* --- Estimate → Work order --- */
+  else if (a === 'est-to-wo') {
+    const entry = estimates.find((x) => x.id === btn.dataset.id);
+    if (!entry) return;
+    const wo = newWorkOrderFromEstimate(entry.data);
+    workorders.unshift(wo);
+    store.set(LS_WORKORDERS, workorders);
+    toast('Work order ' + wo.number + ' created.');
+    navigate('workorder', { id: wo.id });
+  }
+  /* --- Work orders --- */
+  else if (a === 'wo-open') navigate('workorder', { id: btn.dataset.id });
+  else if (a === 'wo-status') {
+    const w = workorders.find((x) => x.id === btn.dataset.id);
+    if (!w) return;
+    w.status = btn.dataset.status;
+    w.updatedAt = Date.now();
+    store.set(LS_WORKORDERS, workorders);
+    render(); toast('Marked ' + WO_STATUS_LABEL[w.status] + '.');
+  }
+  else if (a === 'wo-save-notes') {
+    const w = workorders.find((x) => x.id === btn.dataset.id);
+    if (!w) return;
+    const ta = $('#woNotes');
+    w.techNotes = ta ? ta.value : '';
+    w.updatedAt = Date.now();
+    store.set(LS_WORKORDERS, workorders);
+    toast('Notes saved.');
+  }
+  else if (a === 'wo-to-invoice') {
+    const w = workorders.find((x) => x.id === btn.dataset.id);
+    if (!w) return;
+    const iv = newInvoiceFromWorkOrder(w);
+    invoices.unshift(iv);
+    store.set(LS_INVOICES, invoices);
+    toast('Invoice ' + iv.number + ' created.');
+    navigate('invoice', { id: iv.id });
+  }
+  else if (a === 'wo-share') {
+    const w = workorders.find((x) => x.id === btn.dataset.id);
+    if (w) docPdfShare(w, 'workorder', 'Work order');
+  }
+  else if (a === 'wo-download') {
+    const w = workorders.find((x) => x.id === btn.dataset.id);
+    if (w) docPdfDownload(w, 'workorder');
+  }
+  else if (a === 'wo-print') {
+    const w = workorders.find((x) => x.id === btn.dataset.id);
+    if (w) docPdfPrint(w, 'workorder', 'Work order');
+  }
+  else if (a === 'wo-del') {
+    const w = workorders.find((x) => x.id === btn.dataset.id);
+    if (!w) return;
+    const ok = await confirmDialog({
+      title: 'Delete ' + w.number + '?',
+      body: 'This work order will be permanently deleted from this device.',
+      confirmText: 'Delete', danger: true,
+    });
+    if (ok) {
+      workorders = workorders.filter((x) => x.id !== btn.dataset.id);
+      store.set(LS_WORKORDERS, workorders);
+      render(); toast('Work order deleted.');
+    }
+  }
+  /* --- Invoices --- */
+  else if (a === 'inv-open') navigate('invoice', { id: btn.dataset.id });
+  else if (a === 'inv-mark-paid') {
+    const iv = invoices.find((x) => x.id === btn.dataset.id);
+    if (!iv) return;
+    iv.amountPaidCents = totalsFor(iv).total;
+    iv.status = 'paid';
+    iv.updatedAt = Date.now();
+    store.set(LS_INVOICES, invoices);
+    render(); toast('Marked paid.');
+  }
+  else if (a === 'inv-record-pay') {
+    const iv = invoices.find((x) => x.id === btn.dataset.id);
+    if (!iv) return;
+    const inp = $('#invPayAmt');
+    const r = parseMoneyToCents(inp ? inp.value : '');
+    if (!r.ok || r.cents <= 0) { toast('Enter a valid payment amount.', 'err'); return; }
+    iv.amountPaidCents = (iv.amountPaidCents || 0) + r.cents;
+    const bal = invBalance(iv);
+    iv.status = bal.due <= 0 ? 'paid' : 'unpaid';
+    iv.updatedAt = Date.now();
+    store.set(LS_INVOICES, invoices);
+    render(); toast('Payment recorded. ' + fmtMoney(bal.due) + ' still due.');
+  }
+  else if (a === 'inv-share') {
+    const iv = invoices.find((x) => x.id === btn.dataset.id);
+    if (iv) docPdfShare(iv, 'invoice', 'Invoice');
+  }
+  else if (a === 'inv-download') {
+    const iv = invoices.find((x) => x.id === btn.dataset.id);
+    if (iv) docPdfDownload(iv, 'invoice');
+  }
+  else if (a === 'inv-print') {
+    const iv = invoices.find((x) => x.id === btn.dataset.id);
+    if (iv) docPdfPrint(iv, 'invoice', 'Invoice');
+  }
+  else if (a === 'inv-del') {
+    const iv = invoices.find((x) => x.id === btn.dataset.id);
+    if (!iv) return;
+    const ok = await confirmDialog({
+      title: 'Delete ' + iv.number + '?',
+      body: 'This invoice will be permanently deleted from this device.',
+      confirmText: 'Delete', danger: true,
+    });
+    if (ok) {
+      invoices = invoices.filter((x) => x.id !== btn.dataset.id);
+      store.set(LS_INVOICES, invoices);
+      render(); toast('Invoice deleted.');
     }
   }
 });
