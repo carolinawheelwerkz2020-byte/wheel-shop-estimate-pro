@@ -407,8 +407,17 @@ input[aria-invalid="true"], select[aria-invalid="true"], textarea[aria-invalid="
 .badge { display: inline-block; font-size: 12.5px; font-weight: 800; border-radius: 999px; padding: 4px 11px; letter-spacing: .2px; }
 .badge-draft { background: var(--warn-bg); color: #8a5a00; border: 1px solid #f0dfae; }
 .badge-final { background: var(--ok-bg); color: var(--ok); border: 1px solid #bfe3c6; }
-.saved-actions { display: flex; gap: 8px; margin-top: 12px; }
+.badge-open { background: #e8eef5; color: #37506b; border: 1px solid #c9d8e8; }
+.badge-progress { background: var(--warn-bg); color: #8a5a00; border: 1px solid #f0dfae; }
+.saved-actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
 .saved-actions .btn { flex: 1; }
+.line-item { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 14.5px; }
+.line-item:last-child { border-bottom: none; }
+.totals-mini { display: flex; justify-content: space-between; padding: 6px 0; font-size: 15px; }
+.totals-mini.due { font-weight: 800; font-size: 17px; border-top: 1px solid var(--line); margin-top: 4px; padding-top: 10px; }
+.field-row { display: flex; gap: 8px; align-items: flex-end; }
+.field-row label { flex: 1; }
+.mt { margin-top: 12px; }
 
 .empty-state { text-align: center; padding: 40px 20px; color: var(--muted); }
 .empty-state .big { font-size: 46px; margin-bottom: 10px; }
