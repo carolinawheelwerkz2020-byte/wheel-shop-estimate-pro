@@ -418,6 +418,10 @@ input[aria-invalid="true"], select[aria-invalid="true"], textarea[aria-invalid="
 .field-row { display: flex; gap: 8px; align-items: flex-end; }
 .field-row label { flex: 1; }
 .mt { margin-top: 12px; }
+.preset-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.preset-row .input { flex: 1; min-width: 0; }
+.preset-row .price-wrap { flex: 0 0 110px; display: flex; align-items: center; gap: 4px; }
+.preset-row .price-wrap .input { width: 100%; }
 
 .empty-state { text-align: center; padding: 40px 20px; color: var(--muted); }
 .empty-state .big { font-size: 46px; margin-bottom: 10px; }
