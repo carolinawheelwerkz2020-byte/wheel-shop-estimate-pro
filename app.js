@@ -62,7 +62,7 @@ const LS_INVOICES = 'wsep.v1.invoices';
 const LS_WO_COUNTER = 'wsep.v1.wo_counter';
 const LS_INV_COUNTER = 'wsep.v1.inv_counter';
 const MAX_PHOTOS = 6;
-const APP_VERSION = '2.4';
+const APP_VERSION = '2.5';
 
 const DAMAGE_CATS = [
   { id: 'curbRash', label: 'Curb rash' },
@@ -83,6 +83,43 @@ const PRESETS = [
   { id: 'mount', label: 'Mount & balance', priceCents: 8500 },
 ];
 const PRESET_NOTE = 'Preset prices are editable starting points. Set your own prices for your shop before sending an estimate.';
+
+/* Active presets: the shop's custom list if set, otherwise the built-in defaults. */
+function activePresets() {
+  if (shop.presets && shop.presets.length) return shop.presets;
+  return PRESETS;
+}
+
+function ensureShopPresets() {
+  if (!shop.presets || !shop.presets.length) {
+    shop.presets = PRESETS.map((p) => ({ id: p.id, label: p.label, priceCents: p.priceCents }));
+  }
+  return shop.presets;
+}
+
+function shopPresetRows() {
+  ensureShopPresets();
+  return shop.presets.map((p) =>
+    '<div class="preset-row" data-preset-row="' + esc(p.id) + '">' +
+    '<input type="text" class="input" data-preset-label="' + esc(p.id) + '" value="' + esc(p.label) + '" placeholder="Service name" aria-label="Service name">' +
+    '<div class="price-wrap"><span aria-hidden="true">$</span>' +
+    '<input type="text" class="input" data-preset-price="' + esc(p.id) + '" value="' + esc((p.priceCents / 100).toFixed(2)) + '" inputmode="decimal" placeholder="0.00" aria-label="Price"></div>' +
+    '<button type="button" class="icon-btn" data-action="preset-del" data-id="' + esc(p.id) + '" aria-label="Remove ' + esc(p.label) + '">×</button>' +
+    '</div>'
+  ).join('');
+}
+
+function savePresetField(id, field, value) {
+  ensureShopPresets();
+  const p = shop.presets.find((x) => x.id === id);
+  if (!p) return;
+  if (field === 'label') p.label = value.trim();
+  else if (field === 'price') {
+    const r = parseMoneyToCents(value);
+    if (r.ok) p.priceCents = r.cents;
+  }
+  store.set(LS_SHOP, shop);
+}
 
 const DEFAULT_TERMS =
   'Estimate valid for 30 days. Pricing is an estimate only and may change after full in-person inspection. ' +
@@ -680,7 +717,12 @@ function viewShop() {
     fieldHTML({ id: 'shop-tax', label: 'Default tax rate (%)', path: 'taxRate', inputmode: 'decimal', placeholder: '7.5', hint: 'Used as the starting tax rate on new estimates. You can change it per estimate.', value: shop.taxRate }) +
     '<div class="field-err" id="shop-tax-err" hidden></div>' +
     '<button type="submit" class="btn btn-primary btn-block">Save shop settings</button>' +
-    '</div></form>' + viewBackupCard();
+    '</div></form>' +
+    '<div class="card"><h2>Service presets</h2>' +
+    '<p class="hint">These are the quick-add buttons on the Services step. Edit names and prices, add your own, or remove ones you don\'t use. Changes save automatically.</p>' +
+    '<div id="presetList">' + shopPresetRows() + '</div>' +
+    '<button type="button" class="btn btn-secondary btn-block mt" data-action="preset-add-new">+ Add service</button>' +
+    '</div>' + viewBackupCard();
 }
 
 function saveShopFromForm(form) {
@@ -691,6 +733,7 @@ function saveShopFromForm(form) {
     address: $('#shop-address', form).value.trim(),
     taxRate: $('#shop-tax', form).value.trim(),
     logo: shop.logo,
+    presets: shop.presets, /* custom service presets live here */
   };
   const errEl = $('#shop-tax-err');
   if (data.taxRate !== '') {
@@ -1384,7 +1427,7 @@ function itemCard(it) {
 }
 
 function stepServices() {
-  const presets = PRESETS.map((p) =>
+  const presets = activePresets().map((p) =>
     '<button type="button" class="preset-btn" id="preset-' + p.id + '" data-action="preset-add" data-id="' + p.id + '">' +
     '+ ' + esc(p.label) + '<small>' + fmtMoney(p.priceCents) + '</small></button>'
   ).join('');
@@ -2108,8 +2151,32 @@ document.addEventListener('click', async (e) => {
     if (p) showLightbox(p);
   }
   else if (a === 'preset-add') {
-    const p = PRESETS.find((x) => x.id === btn.dataset.id);
+    const p = activePresets().find((x) => x.id === btn.dataset.id);
     if (p) { addItem(p.label, p.priceCents); toast(p.label + ' added.'); }
+  }
+  else if (a === 'preset-add-new') {
+    ensureShopPresets();
+    shop.presets.push({ id: uid(), label: '', priceCents: 0 });
+    store.set(LS_SHOP, shop);
+    render();
+    const rows = $$('#presetList .preset-row');
+    const last = rows[rows.length - 1];
+    if (last) { const inp = last.querySelector('[data-preset-label]'); if (inp) inp.focus(); }
+  }
+  else if (a === 'preset-del') {
+    ensureShopPresets();
+    const id = btn.dataset.id;
+    const p = shop.presets.find((x) => x.id === id);
+    const ok = await confirmDialog({
+      title: 'Remove "' + (p ? p.label : 'service') + '"?',
+      body: 'This preset will be removed from the quick-add buttons.',
+      confirmText: 'Remove', danger: true,
+    });
+    if (ok) {
+      shop.presets = shop.presets.filter((x) => x.id !== id);
+      store.set(LS_SHOP, shop);
+      render(); toast('Preset removed.');
+    }
   }
   else if (a === 'item-add') addItem('', null);
   else if (a === 'item-remove') {
@@ -2412,6 +2479,14 @@ document.addEventListener('input', (e) => {
     store.set(LS_SHOP, shop);
     updateBrandHeader();
   }, 600);
+});
+
+/* Service presets save automatically when a name or price field changes. */
+document.addEventListener('change', (e) => {
+  const t = e.target;
+  if (!t.dataset) return;
+  if (t.dataset.presetLabel) savePresetField(t.dataset.presetLabel, 'label', t.value);
+  else if (t.dataset.presetPrice) savePresetField(t.dataset.presetPrice, 'price', t.value);
 });
 
 /* ---------------- PWA ---------------- */
